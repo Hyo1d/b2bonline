@@ -1,0 +1,21 @@
+{
+  "name": "remote-b2b", "version": "1.0.1", "private": true,
+  "description": "Remote B2B para Windows: audio P2P y puente Ableton Link",
+  "author": "RemoteB2B", "license": "GPL-2.0-or-later", "main": "build/main.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs", "start": "npm run build && node scripts/start.mjs",
+    "server": "tsx server/src/cli.ts", "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit", "test:e2e": "npm run build && node tests/e2e.mjs",
+    "dist": "npm run build && electron-builder --win portable --x64"
+  },
+  "dependencies": { "ws": "^8.18.3" },
+  "devDependencies": { "@types/node": "^24.0.0", "@types/ws": "^8.18.1", "electron": "44.2.0", "electron-builder": "26.15.3", "esbuild": "^0.25.0", "playwright": "^1.55.0", "tsx": "^4.20.0", "typescript": "^5.9.0" },
+  "build": {
+    "appId": "audio.remoteb2b.desktop", "productName": "RemoteB2B", "asar": true,
+    "files": ["build/**/*", "package.json"],
+    "extraResources": [{"from":"vendor/carabiner","to":"carabiner","filter":["**/*","!**/.git","!**/.git/**/*"]},{"from":"docs","to":"docs"},{"from":"LICENSE","to":"LICENSE"}],
+    "win": {"target":"portable", "icon":"assets/icon.ico", "signExecutable":false},
+    "portable": {"artifactName":"RemoteB2B-${version}-Windows-x64.exe"},
+    "directories": {"output":"release"}
+  }
+}
