@@ -1,10 +1,10 @@
 services:
   - type: web
-    name: remote-b2b
-    runtime: docker
+    name: b2bonline
+    runtime: node
     plan: free
-    dockerfilePath: ./deploy/Dockerfile
-    dockerContext: .
+    buildCommand: npm ci
+    startCommand: npm start
     healthCheckPath: /health
     envVars:
       - key: HOST
