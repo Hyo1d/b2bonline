@@ -1,3 +1,5 @@
+import {Audience} from './Audience';
+import {listenPage,listenScript} from './listenPage';
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -11,16 +13,18 @@ export function startServer(port=8787,host='127.0.0.1') {
     const result:any[]=[{urls:process.env.STUN_URL || 'stun:stun.l.google.com:19302'}];
     if(process.env.TURN_URL && process.env.TURN_SECRET) {const username=`${Math.floor(Date.now()/1000)+86400}:remote-b2b`;result.push({urls:process.env.TURN_URL.split(','),username,credential:createHmac('sha1',process.env.TURN_SECRET).update(username).digest('base64')});}return result;
   };
+  const audience=new Audience(manager,send,iceServers);
   const allowed=(ip:string)=>{const now=performance.now();let entry=limits.get(ip);if(!entry||now>entry.reset){entry={count:0,reset:now+60000};limits.set(ip,entry);}return ++entry.count<=60;};
   const server=http.createServer(async(req,res)=>{
     res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');
     try {
+      if(req.method==='GET'&&['/','/listen','/listen.js','/sessions'].includes(req.url||'')){res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Permissions-Policy','microphone=(), camera=()');res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; media-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'");res.setHeader('Content-Type',req.url==='/sessions'?'application/json':req.url==='/listen.js'?'text/javascript; charset=utf-8':'text/html; charset=utf-8');res.end(req.url==='/sessions'?JSON.stringify(audience.list()):req.url==='/listen.js'?listenScript:listenPage);return;}
       if(req.url==='/health' && req.method==='GET') {res.end(JSON.stringify({ok:true,version:1}));return;}
       if(!allowed(req.socket.remoteAddress||'')) throw new RoomError(429,'Demasiadas solicitudes; esperá un minuto');
       if(req.method!=='POST') throw new RoomError(404,'Ruta inexistente');
       let body='';for await(const chunk of req) {body+=chunk;if(body.length>2048) throw new RoomError(413,'Payload demasiado grande');}
       let data:any;try {data=JSON.parse(body);}catch{throw new RoomError(400,'JSON inválido');}
-      if(!validName(data.name)) throw new RoomError(400,'Nombre inválido');
+      if(!validName(data?.name)) throw new RoomError(400,'Nombre inválido');
       const match=req.url?.match(/^\/rooms\/([A-HJ-NP-Z2-9]{8})\/join$/);
       const result=req.url==='/rooms'?manager.create(data.name.trim()):match?manager.join(match[1],data.name.trim()):null;
       if(!result) throw new RoomError(404,'Ruta inexistente');
@@ -28,7 +32,7 @@ export function startServer(port=8787,host='127.0.0.1') {
     } catch(error) {res.statusCode=error instanceof RoomError?error.status:500;res.end(JSON.stringify({error:error instanceof RoomError?error.message:'Error interno'}));}
   });
   const wss=new WebSocketServer({noServer:true,maxPayload:MAX_PAYLOAD,perMessageDeflate:false});
-  server.on('upgrade',(req,socket,head)=>{if(req.url!=='/ws' || !allowed(req.socket.remoteAddress||'')){socket.destroy();return;}wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req));});
+  server.on('upgrade',(req,socket,head)=>{const guest=req.url?.match(/^\/audience\?id=([a-f0-9]{32})$/);if(guest){if(!allowed(req.socket.remoteAddress||'')){socket.destroy();return;}audience.wss.handleUpgrade(req,socket,head,ws=>audience.accept(guest[1],ws));return;}if(req.url!=='/ws' || !allowed(req.socket.remoteAddress||'')){socket.destroy();return;}wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req));});
   wss.on('connection',ws=>{
     let room:Room|undefined,peer:Peer|undefined;let alive=true,count=0,windowStart=performance.now();
     const authTimer=setTimeout(()=>{if(!peer) ws.close(4001,'Autenticación requerida');},5000);
@@ -43,10 +47,11 @@ export function startServer(port=8787,host='127.0.0.1') {
           if(m.type!=='room.join'||!ROOM_PATTERN.test(m.roomId)||typeof m.peerId!=='string'||typeof m.token!=='string') throw new RoomError(401,'Ticket inválido');
           ({room,peer}=manager.authenticate(m.roomId,m.peerId,m.token));
           const previous=peer.socket;peer.socket=ws;previous?.close(4002,'Sesión reemplazada');peer.lastSeen=performance.now();room.lastSeen=performance.now();clearTimeout(authTimer);
-          broadcast(room,{type:'room.peer-connected',peerId:peer.peerId});broadcast(room,manager.publicState(room));return;
+          broadcast(room,{type:'room.peer-connected',peerId:peer.peerId});broadcast(room,manager.publicState(room));audience.notify(room);return;
         }
         if(!room||peer.socket!==ws) return;room.lastSeen=performance.now();
-        if(m.type==='room.leave') {manager.remove(room,peer);broadcast(room,manager.publicState(room));peer.socket=undefined;ws.close(1000);return;}
+        if(audience.handle(room,peer,m))return;
+        if(m.type==='room.leave') {manager.remove(room,peer);audience.sweep();broadcast(room,manager.publicState(room));peer.socket=undefined;ws.close(1000);return;}
         if(m.type==='tempo.request') {
           if(!finite(m.bpm,20,300)||!Number.isSafeInteger(m.sequence)||m.sequence<0) throw new RoomError(400,'Tempo inválido');
           manager.tempo(room,peer,m.bpm,m.sequence);broadcast(room,{type:'room.authority',...manager.authority(room)});return;
@@ -58,9 +63,9 @@ export function startServer(port=8787,host='127.0.0.1') {
       } catch(error) {send(ws,{type:'error',message:error instanceof Error?error.message:'Mensaje inválido'});if(!peer) ws.close(4001);}
     });
     ws.on('error',()=>{});
-    ws.on('close',()=>{clearTimeout(authTimer);clearInterval(heartbeat);if(room&&peer&&peer.socket===ws){peer.socket=undefined;peer.lastSeen=performance.now();broadcast(room,{type:'room.peer-disconnected',peerId:peer.peerId});broadcast(room,manager.publicState(room));}});
+    ws.on('close',()=>{clearTimeout(authTimer);clearInterval(heartbeat);if(room&&peer&&peer.socket===ws){peer.socket=undefined;peer.lastSeen=performance.now();audience.sweep();broadcast(room,{type:'room.peer-disconnected',peerId:peer.peerId});broadcast(room,manager.publicState(room));}});
   });
-  const sweep=setInterval(()=>{manager.sweep();for(const [ip,l] of limits) if(performance.now()>l.reset) limits.delete(ip);},5000);
+  const sweep=setInterval(()=>{manager.sweep();audience.sweep();for(const [ip,l] of limits) if(performance.now()>l.reset) limits.delete(ip);},5000);
   server.listen(port,host);
-  return {server,manager,close:async()=>{clearInterval(sweep);for(const ws of wss.clients) ws.terminate();await new Promise<void>(r=>wss.close(()=>r()));await new Promise<void>(r=>server.close(()=>r()));}};
+  return {server,manager,close:async()=>{clearInterval(sweep);audience.close();for(const ws of wss.clients) ws.terminate();await new Promise<void>(r=>wss.close(()=>r()));await new Promise<void>(r=>server.close(()=>r()));}};
 }

@@ -1,6 +1,6 @@
 {
   "name": "b2bonline-server",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "RemoteB2B rooms and WebRTC signaling server",
   "license": "GPL-2.0-or-later",
